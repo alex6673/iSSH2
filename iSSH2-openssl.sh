@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
                                    #########
 #################################### iSSH2 #####################################
 #                                  #########                                   #
@@ -87,12 +87,14 @@ do
       fi
     fi
 
-    export CROSS_TOP="$DEVELOPER/Platforms/$PLATFORM.platform/Developer"
+#/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer
+
+    export CROSS_TOP="/Applications/Xcode.app/Contents/Developer/Platforms/$PLATFORM.platform/Developer"
     export CROSS_SDK="$PLATFORM$SDK_VERSION.sdk"
     export SDKROOT="$CROSS_TOP/SDKs/$CROSS_SDK"
     export CC="$CLANG -arch $ARCH"
 
-    CONF="$CONF -m$SDK_PLATFORM-version-min=$MIN_VERSION $EMBED_BITCODE"
+    CONF="$CONF $EMBED_BITCODE"
 
     ./Configure $HOST $CONF >> "$LOG" 2>&1
 
@@ -100,8 +102,8 @@ do
       sed -ie "s!^CFLAG=!CFLAG=-isysroot $SDKROOT !" "Makefile"
     fi
 
-    make depend >> "$LOG" 2>&1
-    make -j "$BUILD_THREADS" build_libs >> "$LOG" 2>&1
+    make depend
+    make -j "$BUILD_THREADS" build_libs 
 
     echo "- $PLATFORM $ARCH done!"
   fi

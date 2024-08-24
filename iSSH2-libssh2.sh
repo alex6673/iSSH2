@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
                                    #########
 #################################### iSSH2 #####################################
 #                                  #########                                   #
@@ -69,7 +69,8 @@ do
       HOST="$ARCH-apple-darwin"
     fi
 
-    export DEVROOT="$DEVELOPER/Platforms/$PLATFORM.platform/Developer"
+    export DEVROOT="/Applications/Xcode.app/Contents/Developer/Platforms/$PLATFORM.platform/Developer"
+    #export DEVROOT="$DEVELOPER/Platforms/$PLATFORM.platform/Developer"
     export SDKROOT="$DEVROOT/SDKs/$PLATFORM$SDK_VERSION.sdk"
     export CC="$CLANG"
     export CPP="$CLANG -E"
@@ -82,10 +83,10 @@ do
       CRYPTO_BACKEND_OPTION="--with-openssl"
     fi
 
-    ./configure --host=$HOST --prefix="$PLATFORM_OUT" --disable-debug --disable-dependency-tracking --disable-silent-rules --disable-examples-build --with-libz $CRYPTO_BACKEND_OPTION --with-libssl-prefix="$OPENSSLDIR" --disable-shared --enable-static  >> "$LOG" 2>&1
+    ./configure --host=$HOST --prefix="$PLATFORM_OUT" --disable-debug --disable-dependency-tracking --disable-silent-rules --disable-examples-build --with-libz $CRYPTO_BACKEND_OPTION --with-libssl-prefix="$OPENSSLDIR" --disable-shared --enable-static  
 
-    make >> "$LOG" 2>&1
-    make -j "$BUILD_THREADS" install >> "$LOG" 2>&1
+    make 
+    make -j "$BUILD_THREADS" install 
 
     echo "- $PLATFORM $ARCH done!"
   fi
