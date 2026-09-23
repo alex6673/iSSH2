@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
                                    #########
 #################################### iSSH2 #####################################
 #                                  #########                                   #
@@ -24,11 +24,12 @@
 ################################################################################
 
 export SCRIPTNAME="iSSH2"
+export BASEPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 #Functions
 
 cleanupFail () {
-  if $1; then
+  if [[ "$1" == true ]]; then
     >&2 echo "Build failed, cleaning up temporary files..."
     rm -rf "$LIBSSLDIR/src/" "$LIBSSLDIR/tmp/" "$LIBSSHDIR/src/" "$LIBSSHDIR/tmp/"
   else
@@ -38,7 +39,7 @@ cleanupFail () {
 }
 
 cleanupAll () {
-  if $1; then
+  if [[ "$1" == true ]]; then
     echo "Cleaning up temporary files..."
     rm -rf "$TEMPPATH"
   else
@@ -48,7 +49,13 @@ cleanupAll () {
 
 getLibssh2Version () {
   if type git >/dev/null 2>&1; then
-    LIBSSH_VERSION=`git ls-remote --tags https://github.com/libssh2/libssh2.git | egrep "libssh2-[0-9]+(\.[0-9])*[a-zA-Z]?$" | cut -f 2 -d - | sort -t . -r | head -n 1`
+    LIBSSH_VERSION="$(git ls-remote --tags --refs https://github.com/libssh2/libssh2.git \
+      | sed -n 's#.*refs/tags/libssh2-\([0-9][0-9.]*[a-zA-Z]*\)$#\1#p' \
+      | sort -t . -k1,1nr -k2,2nr -k3,3nr | head -n 1)"
+    if [[ -z "$LIBSSH_VERSION" ]]; then
+      >&2 echo "Unable to determine the latest Libssh2 version. Use --libssh2=VERS."
+      exit 2
+    fi
     LIBSSH_AUTO=true
   else
     >&2 echo "Install git to automatically get the latest Libssh2 version or use the --libssh2 argument"
@@ -60,7 +67,17 @@ getLibssh2Version () {
 
 getOpensslVersion () {
   if type git >/dev/null 2>&1; then
-    LIBSSL_VERSION=`git ls-remote --tags https://github.com/openssl/openssl.git | egrep "OpenSSL(_[0-9])+[a-zA-Z]?$" | cut -f 2,3,4 -d _ | sort -t _ -r | head -n 1 | tr _ .`
+    LIBSSL_VERSION="$(git ls-remote --tags --refs https://github.com/openssl/openssl.git \
+      | sed -n \
+        -e 's#.*refs/tags/openssl-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+        -e 's#.*refs/tags/OpenSSL_\([0-9][0-9]*_[0-9][0-9]*_[0-9][0-9]*\)$#\1#p' \
+      | tr '_' '.' \
+      | sort -t . -k1,1nr -k2,2nr -k3,3nr \
+      | head -n 1)"
+    if [[ -z "$LIBSSL_VERSION" ]]; then
+      >&2 echo "Unable to determine the latest OpenSSL version. Use --openssl=VERS."
+      exit 2
+    fi
     LIBSSL_AUTO=true
   else
     >&2 echo "Install git to automatically get the latest OpenSSL version or use the --openssl argument"
@@ -71,11 +88,32 @@ getOpensslVersion () {
 }
 
 getBuildSetting () {
-  echo "${1}" | grep -i "^\s*${2}\s*=\s*" | cut -d= -f2 | xargs echo -n
+  printf '%s\n' "$1" | awk -F= -v key="$2" '
+    tolower($1) ~ "^[[:space:]]*" tolower(key) "[[:space:]]*$" {
+      value=$0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      print value
+      exit
+    }'
 }
 
 version () {
-  printf "%02d%02d%02d" ${1//./ }
+  local value="${1:-0}"
+  local major="${value%%.*}"
+  local rest="${value#*.}"
+  local minor="0"
+  local patch="0"
+
+  if [[ "$rest" != "$value" ]]; then
+    minor="${rest%%.*}"
+    rest="${rest#*.}"
+    if [[ "$rest" != "$minor" ]]; then
+      patch="${rest%%.*}"
+    fi
+  fi
+
+  printf "%02d%02d%02d" "$major" "$minor" "$patch"
 }
 
 usageHelp () {
@@ -94,15 +132,17 @@ usageHelp () {
   echo "  -x, --xcodeproj=PATH      get info from the project (requires TARGET)"
   echo "  -t, --target=TARGET       get info from the target (requires XCODEPROJ)"
   echo "      --build-only-openssl  build OpenSSL and skip Libssh2"
+  echo "      --only-print-env      validate options and print the build environment"
+  echo "      --osx                 alias for --platform=macosx"
   echo "      --no-clean            do not clean build folder"
   echo "      --no-bitcode          don't embed bitcode"
   echo "  -h, --help                display this help and exit"
   echo
-  echo "Valid platforms: iphoneos, macosx, appletvos, watchos"
+  echo "Valid platforms: iphoneos, iphonesimulator, macosx, appletvos, appletvsimulator, watchos, watchsimulator"
   echo
   echo "Xcodeproj and target or platform and min version must be set."
   echo
-  exit 1
+  exit "${1:-0}"
 }
 
 #Config
@@ -119,62 +159,111 @@ BUILD_OSX=false
 BUILD_SSL=true
 BUILD_SSH=true
 CLEAN_BUILD=true
+ONLY_PRINT_ENV=false
 
 XCODE_PROJECT=
 TARGET_NAME=
 
-while getopts 'a:p:l:o:v:s:x:t:h-' OPTION ; do
-  case "$OPTION" in
-    a) ARCHS="$OPTARG" ;;
-    p) SDK_PLATFORM="$OPTARG" ;;
-    v) MIN_VERSION="$OPTARG" ;;
-    s) SDK_VERSION="$OPTARG" ;;
-    l) LIBSSH_VERSION="$OPTARG" ;;
-    o) LIBSSL_VERSION="$OPTARG" ;;
-    x) XCODE_PROJECT="$OPTARG" ;;
-    t) TARGET_NAME="$OPTARG" ;;
-    h) usageHelp ;;
-    -) eval FULL_OPTION="\$$OPTIND"
-       OPTARG=$(echo $FULL_OPTION | cut -d'=' -f2)
-       OPTION=$(echo $FULL_OPTION | cut -d'=' -f1)
-       case "$OPTION" in
-         --archs) ARCHS="$OPTARG" ;;
-         --platform) SDK_PLATFORM="$OPTARG" ;;
-         --openssl) LIBSSL_VERSION="$OPTARG" ;;
-         --libssh2) LIBSSH_VERSION="$OPTARG" ;;
-         --sdk-version) SDK_VERSION="$OPTARG" ;;
-         --min-version) MIN_VERSION="$OPTARG" ;;
-         --xcodeproj) XCODE_PROJECT="$OPTARG" ;;
-         --target) TARGET_NAME="$OPTARG" ;;
-         --build-only-openssl) BUILD_SSH=false ;;
-         --only-print-env) BUILD_SSL=false; BUILD_SSH=false ;;
-         --osx) BUILD_OSX=true ;;
-         --no-bitcode) EMBED_BITCODE="" ;;
-         --no-clean) CLEAN_BUILD=false ;;
-         --help) usageHelp ;;
-         * ) echo "$SCRIPTNAME: Invalid option '$FULL_OPTION'"
-             echo "Run '$SCRIPTNAME --help' for more information."
-             exit 1 ;;
-       esac
-       shift
+requireOptionValue () {
+  if [[ "$#" -lt 2 ]] || [[ -z "$2" ]]; then
+    >&2 echo "$SCRIPTNAME: Option '$1' requires a value."
+    >&2 echo "Run '$SCRIPTNAME --help' for more information."
+    exit 1
+  fi
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -a|--archs)
+      requireOptionValue "$1" "${2:-}"
+      ARCHS="$2"
+      shift 2
       ;;
-    \?) echo "$SCRIPTNAME: Invalid option -- $OPTION"
-        echo "Run '$SCRIPTNAME --help' for more information."
-        exit 1 ;;
+    --archs=*) ARCHS="${1#*=}"; requireOptionValue "$1" "$ARCHS"; shift ;;
+    -p|--platform)
+      requireOptionValue "$1" "${2:-}"
+      SDK_PLATFORM="$2"
+      shift 2
+      ;;
+    --platform=*) SDK_PLATFORM="${1#*=}"; requireOptionValue "$1" "$SDK_PLATFORM"; shift ;;
+    -v|--min-version)
+      requireOptionValue "$1" "${2:-}"
+      MIN_VERSION="$2"
+      shift 2
+      ;;
+    --min-version=*) MIN_VERSION="${1#*=}"; requireOptionValue "$1" "$MIN_VERSION"; shift ;;
+    -s|--sdk-version)
+      requireOptionValue "$1" "${2:-}"
+      SDK_VERSION="$2"
+      shift 2
+      ;;
+    --sdk-version=*) SDK_VERSION="${1#*=}"; requireOptionValue "$1" "$SDK_VERSION"; shift ;;
+    -l|--libssh2)
+      requireOptionValue "$1" "${2:-}"
+      LIBSSH_VERSION="$2"
+      shift 2
+      ;;
+    --libssh2=*) LIBSSH_VERSION="${1#*=}"; requireOptionValue "$1" "$LIBSSH_VERSION"; shift ;;
+    -o|--openssl)
+      requireOptionValue "$1" "${2:-}"
+      LIBSSL_VERSION="$2"
+      shift 2
+      ;;
+    --openssl=*) LIBSSL_VERSION="${1#*=}"; requireOptionValue "$1" "$LIBSSL_VERSION"; shift ;;
+    -x|--xcodeproj)
+      requireOptionValue "$1" "${2:-}"
+      XCODE_PROJECT="$2"
+      shift 2
+      ;;
+    --xcodeproj=*) XCODE_PROJECT="${1#*=}"; requireOptionValue "$1" "$XCODE_PROJECT"; shift ;;
+    -t|--target)
+      requireOptionValue "$1" "${2:-}"
+      TARGET_NAME="$2"
+      shift 2
+      ;;
+    --target=*) TARGET_NAME="${1#*=}"; requireOptionValue "$1" "$TARGET_NAME"; shift ;;
+    --build-only-openssl) BUILD_SSH=false; shift ;;
+    --only-print-env) BUILD_SSL=false; BUILD_SSH=false; ONLY_PRINT_ENV=true; shift ;;
+    --osx) BUILD_OSX=true; SDK_PLATFORM="macosx"; shift ;;
+    --no-bitcode) EMBED_BITCODE=""; shift ;;
+    --no-clean) CLEAN_BUILD=false; shift ;;
+    -h|--help) usageHelp 0 ;;
+    --) shift; break ;;
+    -*)
+      >&2 echo "$SCRIPTNAME: Invalid option '$1'"
+      >&2 echo "Run '$SCRIPTNAME --help' for more information."
+      exit 1
+      ;;
+    *)
+      >&2 echo "$SCRIPTNAME: Unexpected argument '$1'"
+      >&2 echo "Run '$SCRIPTNAME --help' for more information."
+      exit 1
+      ;;
   esac
-  shift $((OPTIND - 1))
-  OPTIND=1
 done
 
 echo "Initializing..."
 
-XCODE_VERSION=`xcodebuild -version | grep Xcode | cut -d' ' -f2`
+XCODE_VERSION="$(xcodebuild -version 2>/dev/null | awk '/^Xcode / { print $2; exit }')"
+if [[ -z "$XCODE_VERSION" ]]; then
+  >&2 echo "$SCRIPTNAME: Xcode was not found. Install Xcode and its command line tools."
+  exit 1
+fi
 
-if [[ ! -z "$XCODE_PROJECT" ]] && [[ ! -z "$TARGET_NAME" ]]; then
-  BUILD_SETTINGS=`xcodebuild -project "$XCODE_PROJECT" -target "$TARGET_NAME" -showBuildSettings`
+if [[ -n "$XCODE_PROJECT" ]] && [[ -z "$TARGET_NAME" ]]; then
+  >&2 echo "$SCRIPTNAME: --xcodeproj requires --target."
+  exit 1
+elif [[ -z "$XCODE_PROJECT" ]] && [[ -n "$TARGET_NAME" ]]; then
+  >&2 echo "$SCRIPTNAME: --target requires --xcodeproj."
+  exit 1
+elif [[ -n "$XCODE_PROJECT" ]] && [[ -n "$TARGET_NAME" ]]; then
+  BUILD_SETTINGS="$(xcodebuild -project "$XCODE_PROJECT" -target "$TARGET_NAME" -showBuildSettings 2>/dev/null)"
   SDK_PLATFORM=`getBuildSetting "$BUILD_SETTINGS" "PLATFORM_NAME"`
   MIN_VERSION=`getBuildSetting "$BUILD_SETTINGS" "${SDK_PLATFORM}_DEPLOYMENT_TARGET"`
-  TARGET_ARCHS=`getBuildSetting "$BUILD_SETTINGS" "VALID_ARCHS"`
+  TARGET_ARCHS=`getBuildSetting "$BUILD_SETTINGS" "ARCHS"`
+  if [[ -z "$TARGET_ARCHS" ]]; then
+    TARGET_ARCHS=`getBuildSetting "$BUILD_SETTINGS" "VALID_ARCHS"`
+  fi
 fi
 
 if [[ -z "$SDK_PLATFORM" ]]; then
@@ -193,56 +282,38 @@ if [[ -z "$MIN_VERSION" ]]; then
   exit 1
 fi
 
-if [[  "$SDK_PLATFORM" == "macosx" ]] || [[ "$SDK_PLATFORM" == "iphoneos" ]] || [[ "$SDK_PLATFORM" == "appletvos" ]] || [[ "$SDK_PLATFORM" == "watchos" ]]; then
-  if [[ -z "$ARCHS" ]]; then
-    ARCHS="$TARGET_ARCHS"
-
-    if [[ "$SDK_PLATFORM" == "macosx" ]]; then
-      if [[ -z "$ARCHS" ]]; then
-        ARCHS="x86_64"
-
-        if [[ $(version "$XCODE_VERSION") < $(version "10.0") ]]; then
-          ARCHS="$ARCHS i386"
-        fi
-      fi
-    elif [[ "$SDK_PLATFORM" == "iphoneos" ]]; then
-      if [[ -z "$ARCHS" ]]; then
-        ARCHS="arm64"
-
-        if [[ $(version "$XCODE_VERSION") == $(version "10.1") ]] || [[ $(version "$XCODE_VERSION") > $(version "10.1") ]]; then
-          ARCHS="$ARCHS arm64e"
-        fi
-
-        if [[ $(version "$MIN_VERSION") < $(version "10.0") ]]; then
-          ARCHS="$ARCHS armv7 armv7s"
-        fi
-        if [[ $(version "$XCODE_VERSION") -ge $(version "12.0") ]]; then
-          ARCHS="$ARCHS arm64"
-        fi
-      fi
-
-      ARCHS="$ARCHS x86_64"
-
-      if [[ $(version "$MIN_VERSION") < $(version "10.0") ]]; then
-        ARCHS="$ARCHS i386"
-      fi
-    elif [[ "$SDK_PLATFORM" == "appletvos" ]]; then
-      ARCHS="$ARCHS arm64 x86_64"
-    elif [[ "$SDK_PLATFORM" == "watchos" ]]; then
-      ARCHS="$ARCHS i386 armv7k"
-
-      if [[ $(version "$XCODE_VERSION") == $(version "10.0") ]] || [[ $(version "$XCODE_VERSION") > $(version "10.0") ]]; then
-        ARCHS="$ARCHS arm64_32"
-      fi
+case "$SDK_PLATFORM" in
+  iphoneos|iphonesimulator|macosx|appletvos|appletvsimulator|watchos|watchsimulator)
+    if [[ -z "$ARCHS" ]]; then
+      ARCHS="$TARGET_ARCHS"
     fi
-  fi
-else
+
+    if [[ -z "$ARCHS" ]]; then
+      case "$SDK_PLATFORM" in
+        iphoneos|appletvos) ARCHS="arm64" ;;
+        watchos) ARCHS="arm64_32" ;;
+        iphonesimulator|appletvsimulator|watchsimulator) ARCHS="arm64 x86_64" ;;
+        macosx) ARCHS="arm64 x86_64" ;;
+      esac
+    fi
+    ;;
+  *)
   >&2 echo "$SCRIPTNAME: Unknown platform '$SDK_PLATFORM'"
   >&2 echo "Run '$SCRIPTNAME --help' for more information."
   exit 1
+  ;;
+esac
+
+if [[ "$SDK_PLATFORM" == "macosx" ]]; then
+  # Bitcode is an Apple-platform feature and is not valid for macOS targets.
+  EMBED_BITCODE=""
 fi
 
-ARCHS="$(echo "$ARCHS" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+ARCHS="$(printf '%s\n' "$ARCHS" | tr ', ' '\n\n' | awk 'NF' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+if [[ -z "$ARCHS" ]]; then
+  >&2 echo "$SCRIPTNAME: At least one architecture must be specified."
+  exit 1
+fi
 
 LIBSSH_AUTO=false
 if [[ -z "$LIBSSH_VERSION" ]]; then
@@ -256,18 +327,36 @@ fi
 
 SDK_AUTO=false
 if [[ -z "$SDK_VERSION" ]]; then
-   SDK_VERSION=`xcrun --sdk $SDK_PLATFORM --show-sdk-version`
+   SDK_VERSION="$(xcrun --sdk "$SDK_PLATFORM" --show-sdk-version 2>/dev/null)"
+   if [[ -z "$SDK_VERSION" ]]; then
+     >&2 echo "$SCRIPTNAME: Unable to determine the SDK version for '$SDK_PLATFORM'."
+     exit 1
+   fi
    SDK_AUTO=true
 fi
 
-export BUILD_THREADS=$(sysctl hw.ncpu | awk '{print $2}')
+BUILD_THREADS=""
+if command -v sysctl >/dev/null 2>&1; then
+  BUILD_THREADS="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+fi
+if [[ ! "$BUILD_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+  BUILD_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+fi
+if [[ ! "$BUILD_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+  BUILD_THREADS=1
+fi
+export BUILD_THREADS
 
-export CLANG=`xcrun --find clang`
-export GCC=`xcrun --find gcc`
-export DEVELOPER=`xcode-select --print-path`
+export CLANG="$(xcrun --find clang 2>/dev/null)"
+export GCC="$(xcrun --find gcc 2>/dev/null || true)"
+export DEVELOPER="$(xcode-select --print-path 2>/dev/null)"
 
-export BASEPATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-export TEMPPATH="$TMPDIR$SCRIPTNAME"
+if [[ -z "$CLANG" ]] || [[ -z "$DEVELOPER" ]]; then
+  >&2 echo "$SCRIPTNAME: Xcode command line tools are not configured."
+  exit 1
+fi
+
+export TEMPPATH="${TMPDIR:-/tmp}/$SCRIPTNAME"
 export LIBSSLDIR="$TEMPPATH/openssl-$LIBSSL_VERSION"
 export LIBSSHDIR="$TEMPPATH/libssh2-$LIBSSH_VERSION"
 
@@ -303,13 +392,13 @@ echo
 set -e
 
 if [[ $BUILD_SSL == true ]]; then
-  "$BASEPATH/iSSH2-openssl.sh" || cleanupFail $CLEAN_BUILD
+  "$BASEPATH/iSSH2-openssl.sh" || cleanupFail "$CLEAN_BUILD"
 fi
 
 if [[ $BUILD_SSH == true ]]; then
-  "$BASEPATH/iSSH2-libssh2.sh" || cleanupFail $CLEAN_BUILD
+  "$BASEPATH/iSSH2-libssh2.sh" || cleanupFail "$CLEAN_BUILD"
 fi
 
 if [[ $BUILD_SSL == true ]] || [[ $BUILD_SSH == true ]]; then
-  cleanupAll $CLEAN_BUILD
+  cleanupAll "$CLEAN_BUILD"
 fi

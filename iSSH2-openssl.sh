@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
                                    #########
 #################################### iSSH2 #####################################
 #                                  #########                                   #
@@ -23,13 +23,59 @@
 # THE SOFTWARE.                                                                #
 ################################################################################
 
-XCODE_VERSION=`xcodebuild -version | grep Xcode | cut -d' ' -f2`
-
-version () {
-  printf "%02d%02d%02d" ${1//./ }
-}
+if [[ -z "${BASEPATH:-}" ]]; then
+  BASEPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+fi
 
 source "$BASEPATH/iSSH2-commons"
+
+XCODE_VERSION="$(xcodebuild -version 2>/dev/null | awk '/^Xcode / { print $2; exit }')"
+
+version () {
+  local value="${1:-0}"
+  local major="${value%%.*}"
+  local rest="${value#*.}"
+  local minor="0"
+  local patch="0"
+  if [[ "$rest" != "$value" ]]; then
+    minor="${rest%%.*}"
+    rest="${rest#*.}"
+    if [[ "$rest" != "$minor" ]]; then
+      patch="${rest%%.*}"
+    fi
+  fi
+  printf "%02d%02d%02d" "$major" "$minor" "$patch"
+}
+
+selectConfigureTarget () {
+  local candidate
+  local candidates
+
+  case "$SDK_PLATFORM:$ARCH" in
+    macosx:arm64) candidates="darwin64-arm64 darwin64-arm64-cc" ;;
+    macosx:x86_64) candidates="darwin64-x86_64 darwin64-x86_64-cc" ;;
+    iphoneos:arm64*) candidates="ios64-xcrun ios64-cross iphoneos-cross" ;;
+    iphoneos:*) candidates="ios-xcrun ios-cross iphoneos-cross" ;;
+    iphonesimulator:arm64*) candidates="iossimulator-arm64-xcrun ios64-cross iphoneos-cross" ;;
+    iphonesimulator:x86_64) candidates="iossimulator-x86_64-xcrun iphoneos-cross darwin64-x86_64" ;;
+    appletvsimulator:arm64*) candidates="darwin64-arm64" ;;
+    appletvsimulator:x86_64) candidates="darwin64-x86_64" ;;
+    watchsimulator:arm64*) candidates="darwin64-arm64" ;;
+    watchsimulator:x86_64) candidates="darwin64-x86_64" ;;
+    appletvos:arm64*|watchos:arm64*) candidates="darwin64-arm64" ;;
+    *) candidates="darwin64-x86_64" ;;
+  esac
+
+  for candidate in $candidates; do
+    if ./Configure LIST 2>/dev/null | grep -Eq "(^|[[:space:]])${candidate}([[:space:]]|$)"; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  echo "No compatible OpenSSL Configure target was found for $SDK_PLATFORM/$ARCH." >&2
+  return 1
+}
 
 set -e
 
@@ -37,80 +83,79 @@ mkdir -p "$LIBSSLDIR"
 
 LIBSSL_TAR="openssl-$LIBSSL_VERSION.tar.gz"
 
-downloadFile "https://www.openssl.org/source/$LIBSSL_TAR" "$LIBSSLDIR/$LIBSSL_TAR"
+#LIBSSL_TAR="openssl-3.5.0.tar.gz"
+
+if ! downloadFile "https://github.com/openssl/openssl/releases/download/openssl-$LIBSSL_VERSION/$LIBSSL_TAR" "$LIBSSLDIR/$LIBSSL_TAR"; then
+  downloadFile "https://www.openssl.org/source/$LIBSSL_TAR" "$LIBSSLDIR/$LIBSSL_TAR"
+fi
 
 LIBSSLSRC="$LIBSSLDIR/src/"
+rm -rf "$LIBSSLSRC"
 mkdir -p "$LIBSSLSRC"
 
-set +e
 echo "Extracting $LIBSSL_TAR"
-tar -zxkf "$LIBSSLDIR/$LIBSSL_TAR" -C "$LIBSSLSRC" --strip-components 1 2>&-
-set -e
+tar -xzf "$LIBSSLDIR/$LIBSSL_TAR" -C "$LIBSSLSRC" --strip-components 1
 
 echo "Building OpenSSL $LIBSSL_VERSION, please wait..."
+
+LIPO_LIBSSL=()
+LIPO_LIBCRYPTO=()
 
 for ARCH in $ARCHS
 do
   if [[ "$SDK_PLATFORM" == "macosx" ]]; then
-    CONF="no-shared"
+    CONF=(no-shared no-async)
   else
-    CONF="no-asm no-hw no-shared no-async"
+    CONF=(no-asm no-hw no-shared no-async)
   fi
 
   PLATFORM="$(platformName "$SDK_PLATFORM" "$ARCH")"
   OPENSSLDIR="$LIBSSLDIR/${PLATFORM}_$SDK_VERSION-$ARCH"
-  LIPO_LIBSSL="$LIPO_LIBSSL $OPENSSLDIR/libssl.a"
-  LIPO_LIBCRYPTO="$LIPO_LIBCRYPTO $OPENSSLDIR/libcrypto.a"
+  LIPO_LIBSSL+=("$OPENSSLDIR/libssl.a")
+  LIPO_LIBCRYPTO+=("$OPENSSLDIR/libcrypto.a")
 
   if [[ -f "$OPENSSLDIR/libssl.a" ]] && [[ -f "$OPENSSLDIR/libcrypto.a" ]]; then
     echo "libssl.a and libcrypto.a for $ARCH already exist."
   else
     rm -rf "$OPENSSLDIR"
-    cp -R "$LIBSSLSRC"  "$OPENSSLDIR"
+    mkdir -p "$OPENSSLDIR"
+    cp -R "$LIBSSLSRC/." "$OPENSSLDIR/"
     cd "$OPENSSLDIR"
 
     LOG="$OPENSSLDIR/build-openssl.log"
-    touch $LOG
+    : > "$LOG"
 
-    if [[ "$SDK_PLATFORM" == "macosx" ]]; then
-      if [[ "$ARCH" == "x86_64" ]]; then
-        HOST="darwin64-x86_64-cc"
-      elif [[ "$ARCH" == "arm64" ]] && [[ $(version "$XCODE_VERSION") -ge $(version "12.0") ]]; then
-        HOST="darwin64-arm64-cc"
-      else
-        HOST="darwin-$ARCH-cc"
-      fi
+    SDKROOT="$(xcrun --sdk "$SDK_PLATFORM" --show-sdk-path)"
+    DEPLOYMENT_FLAG="$(deploymentTargetFlag "$SDK_PLATFORM")"
+    HOST="$(selectConfigureTarget)"
+
+    export CROSS_TOP="$DEVELOPER/Platforms/$PLATFORM.platform/Developer"
+    export CROSS_SDK="$(basename "$SDKROOT")"
+    export SDKROOT
+    if [[ "$HOST" == *-xcrun ]]; then
+      # The xcrun targets select the compiler themselves.  CROSS_COMPILE must
+      # remain empty or OpenSSL prefixes the absolute compiler path twice.
+      export CROSS_COMPILE=""
+      export CC="$CLANG"
     else
-      HOST="iphoneos-cross"
-      if [[ "${ARCH}" == *64 ]] || [[ "${ARCH}" == arm64* ]]; then
-        CONF="$CONF enable-ec_nistp_64_gcc_128"
-      fi
+      export CROSS_COMPILE="$DEVELOPER/Toolchains/XcodeDefault.xctoolchain/usr/bin/"
+      export CC="clang"
     fi
+    export CFLAGS="-arch $ARCH -isysroot $SDKROOT $DEPLOYMENT_FLAG=$MIN_VERSION ${EMBED_BITCODE:-}"
+    export CPPFLAGS="$CFLAGS"
+    export LDFLAGS="-arch $ARCH -isysroot $SDKROOT $DEPLOYMENT_FLAG=$MIN_VERSION"
 
-#/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer
+    echo "Configuring OpenSSL target $HOST for $PLATFORM/$ARCH"
+    ./Configure "$HOST" "${CONF[@]}" --prefix="$OPENSSLDIR" >> "$LOG" 2>&1
 
-    export CROSS_TOP="/Applications/Xcode.app/Contents/Developer/Platforms/$PLATFORM.platform/Developer"
-    export CROSS_SDK="$PLATFORM$SDK_VERSION.sdk"
-    export SDKROOT="$CROSS_TOP/SDKs/$CROSS_SDK"
-    export CC="$CLANG -arch $ARCH"
-
-    CONF="$CONF $EMBED_BITCODE"
-
-    ./Configure $HOST $CONF >> "$LOG" 2>&1
-
-    if [[ "$ARCH" == "x86_64" ]]; then
-      sed -ie "s!^CFLAG=!CFLAG=-isysroot $SDKROOT !" "Makefile"
-    fi
-
-    make depend
-    make -j "$BUILD_THREADS" build_libs 
+    make -j "$BUILD_THREADS" build_libs >> "$LOG" 2>&1
 
     echo "- $PLATFORM $ARCH done!"
   fi
 done
 
-lipoFatLibrary "$LIPO_LIBSSL" "$BASEPATH/openssl_$SDK_PLATFORM/lib/libssl.a"
-lipoFatLibrary "$LIPO_LIBCRYPTO" "$BASEPATH/openssl_$SDK_PLATFORM/lib/libcrypto.a"
+lipoFatLibrary "$BASEPATH/openssl_$SDK_PLATFORM/lib/libssl.a" "${LIPO_LIBSSL[@]}"
+lipoFatLibrary "$BASEPATH/openssl_$SDK_PLATFORM/lib/libcrypto.a" "${LIPO_LIBCRYPTO[@]}"
 
 importHeaders "$OPENSSLDIR/include/" "$BASEPATH/openssl_$SDK_PLATFORM/include"
 

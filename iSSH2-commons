@@ -24,27 +24,31 @@
 ################################################################################
 
 downloadFile () {
-  local url=$1
-  local path=$2
-  local filename=`basename "$2"`
+  local url="$1"
+  local path="$2"
+  local filename="$(basename "$path")"
 
-  if [ ! -f "$path" ];
+  if [[ ! -s "$path" ]];
   then
     echo "Downloading $filename"
-    curl -L --progress-bar "$url" > "$path"
+    if ! curl --fail --location --retry 3 --retry-delay 1 \
+      --connect-timeout 20 --progress-bar --output "$path" "$url"; then
+      rm -f "$path"
+      return 1
+    fi
   else
     echo "$filename already exists"
   fi
 
-  local md5=`md5 -q $path`
+  local md5="$(md5 -q "$path")"
   echo "MD5: $md5"
 }
 
 lipoFatLibrary () {
-  local inputs=$1
-  local output=$2
-  local dirname=`dirname "$2"`
-  local filename=`basename "$2"`
+  local output="$1"
+  shift
+  local dirname="$(dirname "$output")"
+  local filename="$(basename "$output")"
 
   echo "Building $filename fat library..."
 
@@ -58,7 +62,14 @@ lipoFatLibrary () {
     rm -f "$output"
   fi
 
-  lipo -create $inputs -output "$output"
+  if [[ "$#" -eq 0 ]]; then
+    echo "No input libraries were provided for $filename." >&2
+    return 1
+  elif [[ "$#" -eq 1 ]]; then
+    cp "$1" "$output"
+  else
+    lipo -create "$@" -output "$output"
+  fi
 }
 
 importHeaders () {
@@ -68,12 +79,18 @@ importHeaders () {
   echo "Copying headers..."
   rm -rf "$output"
   mkdir -p "$output"
-  cp -RL "$input" "$output"
+  cp -RL "$input/." "$output/"
 }
 
 platformName () {
   case "$1" in
     macosx) echo "MacOSX" ;;
+    iphonesimulator|appletvsimulator|watchsimulator)
+      case "$1" in
+        iphonesimulator) echo "iPhoneSimulator" ;;
+        appletvsimulator) echo "AppleTVSimulator" ;;
+        watchsimulator) echo "WatchSimulator" ;;
+      esac ;;
     iphoneos)
       if [[ "$2" == "i386" ]] || [[ "$2" == "x86_64" ]]; then
         echo "iPhoneSimulator"
@@ -94,5 +111,18 @@ platformName () {
       fi ;;
     *) echo "Unknown platform $1"
        exit 1 ;;
+  esac
+}
+
+deploymentTargetFlag () {
+  case "$1" in
+    iphoneos) echo "-miphoneos-version-min" ;;
+    iphonesimulator) echo "-miphonesimulator-version-min" ;;
+    macosx) echo "-mmacosx-version-min" ;;
+    appletvos) echo "-mtvos-version-min" ;;
+    appletvsimulator) echo "-mtvos-simulator-version-min" ;;
+    watchos) echo "-mwatchos-version-min" ;;
+    watchsimulator) echo "-mwatchos-simulator-version-min" ;;
+    *) echo "Unknown platform $1" >&2; return 1 ;;
   esac
 }
